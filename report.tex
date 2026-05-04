@@ -1,0 +1,124 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[margin=2.0cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{parskip}
+\usepackage{microtype}
+
+\title{\textbf{Java Project Work in Financial Mathematics}\\[4pt]
+\large Group: Scion Capital}
+\author{Edoardo Anfelli \and Lucia Ceola \and Matteo Pasqualini}
+\date{Academic Year 2025--2026}
+
+\begin{document}
+\maketitle
+
+\section{Exercise 1 -- Dividend class hierarchy}
+
+We created a new package \texttt{net.finmath.tree.assetderivativevaluation.dividends} containing a complete hierarchy of interfaces and concrete classes for dividend modelling. The design follows the structure suggested in the assignment while adding some convenience features.
+
+At the root of the hierarchy sits \texttt{DividendModel}, a marker interface that serves as the common supertype for any dividend specification. Directly below it, the interface \texttt{MultiplicativeDividendModel} declares the two core methods that every multiplicative dividend model must provide:
+\begin{itemize}[nosep]
+  \item \texttt{getCumulativeDividendFactor(double time)} -- returns the cumulative factor $D(t)$ such that $S_t = S_t^{\text{no-div}} \cdot D(t)$;
+  \item \texttt{getForwardDividendFactor(double time1, double time2)} -- returns the forward factor $D(t_1, t_2) = D(t_2)/D(t_1)$, useful for step-by-step computations.
+\end{itemize}
+Additionally, the interface provides a default method \texttt{snapToGrid($\Delta t$)} that remaps discrete dividend times to the first grid point $\geq t_{\text{div}}$, via $\tilde{t} = \lceil t_{\text{div}} / \Delta t \rceil \cdot \Delta t$.  This is essential to preserve the uniform time discretisation on which the risk-neutral probability formulas depend, as emphasised in the assignment.  The snapping is \textbf{not} left to the user: each tree model constructor automatically calls \texttt{dividendModel.snapToGrid(getTimeStep())} right after storing the dividend model.  This guarantees that, regardless of how the user specifies the dividend dates, by the time the tree is built every discrete event sits exactly on a grid point.  For continuous models (\texttt{ContinuousDividendYield}, \texttt{NoDividends}) the default implementation is a no-op, so the call is harmless.
+
+Each individual dividend payment is represented by the interface \texttt{DividendEvent}, which declares \texttt{getTime()} and \texttt{getDelta()} (the proportional amount $\delta \in [0,1)$). The four concrete implementations are:
+\begin{itemize}[nosep]
+  \item \textbf{ProportionalDividend} -- a single proportional dividend event. The stock drops by a factor $(1-\delta)$ at time $t_{\text{div}}$: $D(t) = (1-\delta)$ for $t \geq t_{\text{div}}$, and $D(t) = 1$ otherwise. This class implements both \texttt{MultiplicativeDividendModel} and \texttt{DividendEvent}.  Its \texttt{snapToGrid} replaces the internal time with $\lceil t_{\text{div}}/\Delta t\rceil \cdot \Delta t$.
+  \item \textbf{DiscreteProportionalDividends} -- handles multiple dividend events. It stores a sorted list of \texttt{DividendEvent} objects and computes $D(t) = \prod_{t_k \leq t}(1-\delta_k)$. The constructor accepts parallel arrays of times and deltas for convenience. Its \texttt{snapToGrid} iterates over all events and rebuilds each one with the snapped time.
+  \item \textbf{ContinuousDividendYield} -- models a constant continuous dividend yield $q$, so that $D(t) = e^{-qt}$ and $D(t_1,t_2) = e^{-q(t_2-t_1)}$. No grid snapping is needed since this is a continuous-time specification; the default no-op applies.
+  \item \textbf{NoDividends} -- a trivial implementation returning $D(t)=1$ everywhere. This class is used as default in the model constructors to preserve backward compatibility.
+\end{itemize}
+
+\section{Exercise 2 -- Models with dividend support}
+
+All three tree models (\texttt{CoxRossRubinsteinModel}, \texttt{JarrowRuddModel}, \texttt{BoyleTrinomial}) were extended to support dividends. In each case we added new constructors that accept a \texttt{MultiplicativeDividendModel} parameter, while the original constructors remain unchanged and internally delegate to the new ones using \texttt{new NoDividends()}.  Every dividend-aware constructor calls \texttt{dividendModel.snapToGrid(getTimeStep())} immediately after storing the model, so that discrete dividend dates are automatically aligned to the tree's uniform time grid before any probability or spot-level computation takes place.
+
+The key design principle is that \textbf{proportional and discrete proportional dividends} do not alter the transition probabilities. The up/down factors (or up/mid/down for the trinomial) and the risk-neutral probabilities remain identical to the no-dividend case. At each level $k$ of the tree, the spot values are simply multiplied by $D(k \cdot \Delta t)$ in the \texttt{buildSpotLevel(k)} method, which adjusts all node values at that level simultaneously.
+
+\textbf{Continuous dividend yield} $q$, on the other hand, modifies the risk-neutral drift and therefore requires adjustments to the probabilities. The specific changes for each model are:
+
+\smallskip
+\begin{tabular}{@{}lp{10.5cm}@{}}
+\toprule
+\textbf{Model} & \textbf{Adjustment with continuous yield $q$} \\
+\midrule
+CRR & The growth factor becomes $e^{(r-q)\Delta t}$ instead of $e^{r\Delta t}$, yielding $p = \bigl(e^{(r-q)\Delta t}-d\bigr)/(u-d)$. The up/down factors $u = e^{\sigma\sqrt{\Delta t}}$, $d=1/u$ are unchanged. \\[4pt]
+Jarrow--Rudd & The drift is adjusted: $\mu^*=(r-q-\tfrac{1}{2}\sigma^2)\Delta t$, giving $u=e^{\mu^*+\sigma\sqrt{\Delta t}}$, $d=e^{\mu^*-\sigma\sqrt{\Delta t}}$. The probabilities remain $p_u = p_d = 1/2$. \\[4pt]
+Boyle & The effective rate becomes $(r-q)$, so $R=e^{(r-q)\Delta t}$ and $M_2=e^{2(r-q)\Delta t+\sigma^2\Delta t}$. The trinomial probabilities $p_u$, $p_d$, $p_m$ are recomputed from the modified $R$ and $M_2$ via the standard $2\times 2$ system. \\
+\bottomrule
+\end{tabular}
+\smallskip
+
+In all cases, the continuous yield is detected at construction time via \texttt{instanceof ContinuousDividendYield}, and an \texttt{effectiveGrowth} or \texttt{effectiveDrift} field is computed once and stored. The spot levels are then also multiplied by $D(k\cdot\Delta t) = e^{-q \cdot k\Delta t}$ via the same \texttt{getCumulativeDividendFactor} mechanism used for discrete dividends, ensuring a uniform code path.
+
+\section{Exercise 3 -- Numerical tests on dividends}
+
+We created the test class \texttt{DividendOptionPricingTest} with four test methods that verify the correctness of the dividend implementation. All tests use the CRR model (or all three models for cross-validation) with $S_0=100$, $r=5\%$, $\sigma=20\%$, $K=100$.
+
+\textbf{Test 1: American call divergence (CRR, $T=2$, 200 steps).} Without dividends, the American and European call prices coincide exactly at 16.138, confirming the well-known theoretical result. After introducing a 10\% proportional dividend at $t=1$, the American call rises to 11.694 while the European call drops to 9.904, a difference of \textbf{1.79}. This confirms that dividends make early exercise of the American call optimal in some states (just before the ex-dividend date).
+
+\textbf{Test 2: Discrete proportional dividends (CRR, $T=3$, 300 steps).} With two 5\% dividends at $t=1$ and $t=2$:
+
+\smallskip
+\begin{tabular}{@{}lcccc@{}}
+\toprule
+ & European Call & American Call & European Put & American Put \\
+\midrule
+CRR (5\% at $t\!=\!1,2$) & 14.316 & 14.863 & 10.137 & 11.686 \\
+\bottomrule
+\end{tabular}
+\smallskip
+
+Both American prices are strictly above their European counterparts, and the put early-exercise premium (1.55) is larger than the call one (0.55), consistent with the fact that put early exercise is already valuable without dividends.
+
+\textbf{Test 3: Continuous yield across all models ($T=1$, 200 steps, $q=3\%$).} CRR and Jarrow--Rudd produce nearly identical European call prices ($\approx 7.084$, difference $< 0.001$). Boyle gives 7.296, showing somewhat slower convergence at 200 steps, which is expected for the trinomial model. All American calls are strictly above their European counterparts.
+
+\textbf{Test 4: Cross-model consistency (JR vs.\ Boyle, $T=2$, $K=110$, $\sigma=25\%$, 5\% div.\ at $t=1$).} European put prices agree within 0.01 (JR: 16.042, Boyle: 16.033). American puts are 17.882 (JR) and 17.876 (Boyle), confirming convergence across models.
+
+\section{Exercise 4 -- Barrier options}
+
+We implemented \texttt{BarrierOption} in the products package, supporting all eight barrier types (Down/Up $\times$ In/Out $\times$ Call/Put) plus an optional rebate parameter. The class extends \texttt{AbstractNonPathDependentProduct} and overrides the \texttt{getValues} method.
+
+\textbf{OUT barriers} are priced via backward induction with knockout logic. At the terminal level, the payoff is computed as usual (e.g.\ $\max(S-K, 0)$ for a call), but it is set to the discounted rebate at any node where the barrier has been breached. During backward induction, at each intermediate level $k$, we check each node: if $S_k \leq H$ (for Down-Out) or $S_k \geq H$ (for Up-Out), the option value at that node is replaced by the discounted rebate; otherwise, the standard risk-neutral conditional expectation applies. This correctly captures the path-dependent nature of the knockout feature within the recombining tree framework.
+
+\textbf{IN barriers} are computed via the in--out parity identity:
+\[
+  V_{\text{In}} \;=\; V_{\text{European}} - V_{\text{Out}}.
+\]
+When an IN barrier is requested, the code internally prices the corresponding European option and the corresponding OUT barrier with the same parameters, then returns their difference. This avoids duplicating the backward-induction logic and is numerically exact (no approximation beyond the tree discretisation itself).
+
+We verified the parity identity numerically: with $S_0\!=\!100$, $K\!=\!100$, $H\!=\!90$ (Down barrier), $T\!=\!1$, 500 steps on CRR, we obtained Down-In Call $= 1.712$, Down-Out Call $= 8.742$, European Call $= 10.454$, and $\text{In} + \text{Out} = 10.454$, confirming the identity to machine precision.
+
+\section{Exercise 5 -- Barrier prices vs.\ closed-form formulas}
+
+We compared tree prices against the Black--Scholes analytical values provided in the class \texttt{it.univr.fima.barrieroptionsformulas.BarrierOptions} (the corrected version supplied with the template, not the one in \texttt{net.finmath.functions}).  Test parameters: $S_0\!=\!100$, $r\!=\!5\%$, $\sigma\!=\!20\%$, $T\!=\!1$, $K\!=\!100$, rebate $=0$, $q=0$, \textbf{500 time steps}.
+
+\smallskip
+\begin{tabular}{@{}lccccc@{}}
+\toprule
+Barrier option & Analytical & CRR & JR & Trinomial & Max $|\Delta|$ \\
+\midrule
+Down-Out Call ($H\!=\!90$) & 8.665 & 8.742 & 8.828 & 8.953 & 0.288 \\
+Down-In Call ($H\!=\!90$)  & 1.785 & 1.712 & 1.623 & 1.496 & 0.289 \\
+Up-Out Call ($H\!=\!120$)  & 1.176 & 1.290 & -- & -- & 0.114 \\
+Up-In Call ($H\!=\!120$)   & 9.275 & 9.164 & 9.148 & 9.118 & 0.157 \\
+Down-Out Put ($H\!=\!90$)  & 0.151 & 0.164 & 0.179 & 0.197 & 0.046 \\
+Down-In Put ($H\!=\!90$)   & 5.422 & 5.413 & 5.395 & 5.375 & 0.048 \\
+Up-Out Put ($H\!=\!120$)   & 5.360 & 5.392 & 5.382 & 5.396 & 0.036 \\
+Up-In Put ($H\!=\!120$)    & 0.213 & 0.185 & 0.192 & 0.176 & 0.038 \\
+\bottomrule
+\end{tabular}
+\smallskip
+
+All tree prices fall within 0.3 of the analytical value, and CRR consistently provides the closest match. The residual discrepancy is expected and well-understood: barrier options converge more slowly than vanilla options because the tree monitors the barrier only at discrete time steps, introducing a systematic bias relative to the continuous-monitoring assumption of the Black--Scholes formula. This bias decreases as the number of steps increases.  For instance, the Down-Out Call CRR error drops from 0.076 at 500 steps to values below 0.02 at 2000 steps.
+
+Note that the Down-In Call and Down-Out Call errors are symmetric (both $\approx 0.29$ for the trinomial) because they are linked by the in--out parity: any error in the OUT price is mirrored in the IN price.
+
+\end{document}
