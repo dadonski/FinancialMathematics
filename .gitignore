@@ -5,5 +5,4 @@ bin/
 .settings/
 *.class
 *.log
-.DS_Store
-.claude/
+.DS_Store/
